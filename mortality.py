@@ -1,133 +1,125 @@
 import pandas as pd
+import numpy as np
 
-def calculate_mortality_dynamic(
+def calculate_qxy_projection_compact(
     file_path='Hinsdale_excel.xlsx',
     gender='Female',
-    start_age=60,
-    end_age=65,
-    start_year=2022,
-    end_year=2030,
-    mortality_column='General_EE_Female',
-    base_year_of_mortality=2021
+    person_age=54,
+    person_year=2022,
+    base_year=2010,
+    max_age=65,
+    mortality_column='General_EE_Female'
 ):
+
     # -------------------- Read Sheets --------------------
     mortality_df = pd.read_excel(file_path, sheet_name='Mortality')
     improvement_df = pd.read_excel(file_path, sheet_name='MP-2021')
-    
-    # Ensure Age is integer
+
+    # Ensure correct types
     mortality_df['Age'] = mortality_df['Age'].astype(int)
     improvement_df['Age'] = improvement_df['Age'].astype(int)
-    
-    # Convert column names to string
+
     mortality_df.columns = [str(c).strip() for c in mortality_df.columns]
     improvement_df.columns = [str(c).strip() for c in improvement_df.columns]
-    
-    # Filter improvement factors for the selected gender
-    imp_gender = improvement_df[improvement_df['Gender'].str.strip().str.lower() == gender.lower()]
-    imp_gender = imp_gender.set_index('Age')
-    
-    # -------------------- Prepare tables --------------------
-    long_rows = []
-    pivot_dict = {}
-    
-    for age in range(start_age, end_age + 1):
-        # Base mortality qx at base year
-        qx_row = mortality_df.loc[mortality_df['Age'] == age, mortality_column]
-        if qx_row.empty:
-            print(f"[Warning] Age {age} not found in Mortality sheet")
+
+    # Filter improvement factors for selected gender
+    imp = improvement_df[improvement_df['Gender'].str.lower() == gender.lower()]
+    imp = imp.set_index('Age')
+
+    # -------------------- PRINT INPUT DATAFRAMES --------------------
+    print("\n============ Mortality Sheet ============")
+    print(mortality_df)
+
+    print("\n============ MP-2021 (Raw) ============")
+    print(improvement_df)
+
+    print("\n============ MP-2021 (Filtered for Gender, Age Indexed) ============")
+    print(imp)
+
+    # -------------------- Determine year range --------------------
+    start_col_year = min(person_year, base_year)
+    end_col_year = person_year + (max_age - person_age)
+    year_range = list(range(start_col_year, end_col_year + 1))
+
+    # -------------------- Prepare Full q_x,y Table --------------------
+    result_df = pd.DataFrame(index=range(person_age, max_age + 1),
+                             columns=['Year'] + year_range)
+    result_df.index.name = 'Age'
+
+    for age in range(person_age, max_age + 1):
+        result_df.loc[age, 'Year'] = person_year + (age - person_age)
+
+    # -------------------- Compute q_x,y --------------------
+    for age in range(person_age, max_age + 1):
+
+        # Base q_x for base year
+        qx_base_row = mortality_df.loc[mortality_df['Age'] == age, mortality_column]
+        if qx_base_row.empty:
             continue
-        qx_base = qx_row.values[0]
-        
-        # Get improvement row for age
-        if age not in imp_gender.index:
-            print(f"[Warning] Age {age} not found in MP-2021 sheet")
+        qx_base = qx_base_row.values[0]
+
+        # Improvement factor row
+        if age not in imp.index:
             continue
-        imp_row = imp_gender.loc[age]
-        
-        # -------------------- Forward or Backward projection --------------------
-        qx_dict = {}  # Store for pivot table
-        
-        # Backward projection if start_year < base_year_of_mortality
-        if start_year <= base_year_of_mortality:
-            qx = qx_base
-            for year in range(base_year_of_mortality - 1, start_year - 1, -1):
-                mx_y = imp_row.get(str(year + 1)) if str(year + 1) in imp_row else imp_row.get(year + 1)
-                if mx_y is None:
-                    continue
-                qxy = qx / (1 - mx_y)  # inverse for backward
-                long_rows.append({
-                    'Age': age,
-                    'Year': year,
-                    'qx': round(qx, 6),
-                    'mx_y': round(mx_y, 6),
-                    'qxy': round(qxy, 6)
-                })
-                qx = qxy
-                qx_dict[year] = round(qxy, 6)
-        
-        # Forward projection
-        qx = qx_base
-        for year in range(max(start_year, base_year_of_mortality + 1), end_year + 1):
-            mx_y = imp_row.get(str(year)) if str(year) in imp_row else imp_row.get(year)
-            if mx_y is None:
+        imp_row = imp.loc[age]
+
+        q_map = {base_year: qx_base}
+
+        # ----- BACKWARD PROJECTION -----
+        q_prev = qx_base
+        for y in range(base_year - 1, start_col_year - 1, -1):
+            next_year = y + 1
+            m = imp_row.get(str(next_year), np.nan)
+            if pd.isna(m):
+                q_map[y] = np.nan
                 continue
-            qxy = qx * (1 - mx_y)
-            long_rows.append({
-                'Age': age,
-                'Year': year,
-                'qx': round(qx, 6),
-                'mx_y': round(mx_y, 6),
-                'qxy': round(qxy, 6)
-            })
-            qx = qxy
-            qx_dict[year] = round(qxy, 6)
-        
-        pivot_dict[age] = qx_dict
-    
-    # -------------------- Convert to DataFrames --------------------
-    long_df = pd.DataFrame(long_rows)
-    pivot_df = pd.DataFrame(pivot_dict).T
-    pivot_df.index.name = 'Age'
-    
-    # -------------------- Cohort-style compact output --------------------
-    cohort_rows = []
-    for i, age in enumerate(range(start_age, end_age + 1)):
-        year = start_year + i
-        row = long_df[(long_df['Age'] == age) & (long_df['Year'] == year)]
-        if not row.empty:
-            qxy = row['qxy'].values[0]
-            cohort_rows.append({'Age-Year': f"{age}-{year}", 'qxy': qxy})
-    cohort_df = pd.DataFrame(cohort_rows)
-    
-    # -------------------- Print tables --------------------
-    print("\n=== Long-format table ===")
-    print(long_df)
-    print("\n=== Pivot table (Age x Year) ===")
-    print(pivot_df)
-    print("\n=== Cohort-style Age-Year-qxy ===")
-    print(cohort_df)
-    
-    return long_df, pivot_df, cohort_df
+            qy = q_prev / (1 - m)
+            q_map[y] = qy
+            q_prev = qy
+
+        # ----- FORWARD PROJECTION -----
+        q_prev = qx_base
+        for y in range(base_year + 1, end_col_year + 1):
+            m = imp_row.get(str(y), np.nan)
+            if pd.isna(m):
+                q_map[y] = np.nan
+                continue
+            qy = q_prev * (1 - m)
+            q_map[y] = qy
+            q_prev = qy
+
+        # Save into result_df
+        for y in year_range:
+            result_df.loc[age, y] = q_map.get(y, np.nan)
+
+    # -------------------- PRINT FULL q_x,y TABLE --------------------
+    print("\n============ FULL q_x,y Table ============")
+    print(result_df)
+
+    # -------------------- Create Compact Age-Year-qx Table --------------------
+    compact_rows = []
+    for age in result_df.index:
+        year = int(result_df.loc[age, 'Year'])
+        qx = result_df.loc[age, year]
+        compact_rows.append({'Age': age, 'Year': year, 'qx_year': qx})
+
+    compact_df = pd.DataFrame(compact_rows)
+    compact_df['qx_year'] = compact_df['qx_year'].round(8)
+
+    # -------------------- PRINT COMPACT TABLE --------------------
+    print("\n============ COMPACT Age-Year-qx Table ============")
+    print(compact_df)
+
+    return result_df, compact_df
 
 
-# -------------------- HARDCODED INPUTS --------------------
-file_path = 'Hinsdale_excel.xlsx'
-gender = 'Female'
-start_age = 60
-end_age = 65
-start_year = 2022
-end_year = 2030
-mortality_column = 'General_EE_Female'
-base_year_of_mortality = 2021
-
-# -------------------- Run calculation --------------------
-long_df, pivot_df, cohort_df = calculate_mortality_dynamic(
-    file_path=file_path,
-    gender=gender,
-    start_age=start_age,
-    end_age=end_age,
-    start_year=start_year,
-    end_year=end_year,
-    mortality_column=mortality_column,
-    base_year_of_mortality=base_year_of_mortality
+# -------------------- Example Run --------------------
+full_df, compact_df = calculate_qxy_projection_compact(
+    file_path='Hinsdale_excel.xlsx',
+    gender='Female',
+    person_age=54,
+    person_year=2022,
+    base_year=2010,
+    max_age=65,
+    mortality_column='General_EE_Female'
 )
